@@ -32,6 +32,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 import subprocess
 import shutil
 from typing import AsyncIterable
+import argparse
 
 # Configure logging
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -242,6 +243,15 @@ async def get_user_input(prompt="You: "):
     })
     session = PromptSession(style=style)
     return await session.prompt_async(prompt, multiline=False)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run the Claude-3-Sonnet Engineer Chat with Automode")
+    parser.add_argument('--automode', action='store_true', help='Start in automode')
+    parser.add_argument('--iterations', type=int, default=25, help='Number of iterations for automode')
+    parser.add_argument('--goal', type=str, help='Goal for automode')
+    parser.add_argument('--tts', choices=['on', 'off'], default='off', help='Enable or disable text-to-speech')
+    return parser.parse_args()
+
 
 def setup_virtual_environment() -> Tuple[str, str]:
     venv_name = "code_execution_env"
@@ -2077,153 +2087,204 @@ async def test_voice_mode():
 
 async def main():
     global automode, conversation_history, use_tts, tts_enabled
-    console.print(Panel("Welcome to the Claude-3-Sonnet Engineer Chat with Multi-Agent, Image, Voice, and Text-to-Speech Support!", title="Welcome", style="bold green"))
-    console.print("Type 'exit' to end the conversation.")
-    console.print("Type 'image' to include an image in your message.")
-    console.print("Type 'voice' to enter voice input mode.")
-    console.print("Type 'test voice' to run a voice input test.")
-    console.print("Type 'automode [number]' to enter Autonomous mode with a specific number of iterations.")
-    console.print("Type 'reset' to clear the conversation history.")
-    console.print("Type 'save chat' to save the conversation to a Markdown file.")
-    console.print("Type '11labs on' to enable text-to-speech.")
-    console.print("Type '11labs off' to disable text-to-speech.")
-    console.print("While in automode, press Ctrl+C at any time to exit the automode to return to regular chat.")
+    args = parse_args()
+    if args.tts == 'on':
+        use_tts = True
+        tts_enabled = True
+        console.print(Panel("Text-to-speech enabled via command line argument.", style="bold green"))
+    else:
+        use_tts = False
+        tts_enabled = False
+        console.print(Panel("Text-to-speech disabled via command line argument.", style="bold yellow"))
 
-    voice_mode = False
+    if args.automode:
+        automode = True
+        max_iterations = args.iterations
+        iteration_count = 0
+        error_count = 0
+        max_errors = 5  # Maximum number of consecutive errors before exiting automode
+        user_input = args.goal
+        if not user_input:
+            console.print(Panel("No goal provided for automode. Please provide a goal via the --goal argument.", style="bold red"))
+            return
+        try:
+            while automode and iteration_count < max_iterations:
+                try:
+                    response, exit_continuation = await chat_with_claude(user_input, current_iteration=iteration_count+1, max_iterations=max_iterations)
+                    error_count = 0  # Reset error count on successful iteration
+                except Exception as e:
+                    console.print(Panel(f"Error in automode iteration: {str(e)}", style="bold red"))
+                    error_count += 1
+                    if error_count >= max_errors:
+                        console.print(Panel(f"Exiting automode due to {max_errors} consecutive errors.", style="bold red"))
+                        automode = False
+                        break
+                    continue
 
-    while True:
-        if voice_mode:
-            user_input = await voice_input()
-            if user_input is None:
-                voice_mode = False
-                cleanup_speech_recognition()
-                console.print(Panel("Exited voice input mode due to error. Returning to text input.", style="bold yellow"))
-                continue
-            
-            stay_in_voice_mode, command_result = process_voice_command(user_input)
-            if not stay_in_voice_mode:
-                voice_mode = False
-                cleanup_speech_recognition()
-                console.print(Panel("Exited voice input mode. Returning to text input.", style="bold green"))
-                if command_result:
-                    console.print(Panel(command_result, style="cyan"))
-                continue
-            elif command_result:
-                console.print(Panel(command_result, style="cyan"))
-                continue
-        else:
-            user_input = await get_user_input()
-
-        if user_input.lower() == 'exit':
-            console.print(Panel("Thank you for chatting. Goodbye!", title_align="left", title="Goodbye", style="bold green"))
-            break
-
-        if user_input.lower() == 'test voice':
-            await test_voice_mode()
-            continue
-
-        if user_input.lower() == '11labs on':
-            use_tts = True
-            tts_enabled = True
-            console.print(Panel("Text-to-speech enabled.", style="bold green"))
-            continue
-
-        if user_input.lower() == '11labs off':
-            use_tts = False
-            tts_enabled = False
-            console.print(Panel("Text-to-speech disabled.", style="bold yellow"))
-            continue
-
-
-
-        if user_input.lower() == 'reset':
-            reset_conversation()
-            continue
-
-        if user_input.lower() == 'save chat':
-            filename = save_chat()
-            console.print(Panel(f"Chat saved to {filename}", title="Chat Saved", style="bold green"))
-            continue
-
-        if user_input.lower() == 'voice':
-            voice_mode = True
-            initialize_speech_recognition()
-            console.print(Panel("Entering voice input mode. Say 'exit voice mode' to return to text input.", style="bold green"))
-            continue
-
-        if user_input.lower() == 'image':
-            image_path = (await get_user_input("Drag and drop your image here, then press enter: ")).strip().replace("'", "")
-
-            if os.path.isfile(image_path):
-                user_input = await get_user_input("You (prompt for image): ")
-                response, _ = await chat_with_claude(user_input, image_path)
-            else:
-                console.print(Panel("Invalid image path. Please try again.", title="Error", style="bold red"))
-                continue
-        elif user_input.lower().startswith('automode'):
-            try:
-                parts = user_input.split()
-                if len(parts) > 1 and parts[1].isdigit():
-                    max_iterations = int(parts[1])
+                if exit_continuation or CONTINUATION_EXIT_PHRASE in response:
+                    console.print(Panel("Automode completed.", title_align="left", title="Automode", style="green"))
+                    automode = False
                 else:
-                    max_iterations = MAX_CONTINUATION_ITERATIONS
+                    console.print(Panel(f"Continuation iteration {iteration_count + 1} completed. Press Ctrl+C to exit automode. ", title_align="left", title="Automode", style="yellow"))
+                    user_input = "Continue with the next step. Or STOP by saying 'AUTOMODE_COMPLETE' if you think you've achieved the results established in the original request."
+                iteration_count += 1
 
-                automode = True
-                console.print(Panel(f"Entering automode with {max_iterations} iterations. Please provide the goal of the automode.", title_align="left", title="Automode", style="bold yellow"))
-                console.print(Panel("Press Ctrl+C at any time to exit the automode loop.", style="bold yellow"))
+                if iteration_count >= max_iterations:
+                    console.print(Panel("Max iterations reached. Exiting automode.", title_align="left", title="Automode", style="bold red"))
+                    automode = False
+        except KeyboardInterrupt:
+            console.print(Panel("\nAutomode interrupted by user. Exiting automode.", title_align="left", title="Automode", style="bold red"))
+            automode = False
+            if conversation_history and conversation_history[-1]["role"] == "user":
+                conversation_history.append({"role": "assistant", "content": "Automode interrupted. How can I assist you further?"})
+
+        console.print(Panel("Exited automode. Returning to regular chat.", style="green"))
+    else:
+            
+        console.print(Panel("Welcome to the Claude-3-Sonnet Engineer Chat with Multi-Agent, Image, Voice, and Text-to-Speech Support!", title="Welcome", style="bold green"))
+        console.print("Type 'exit' to end the conversation.")
+        console.print("Type 'image' to include an image in your message.")
+        console.print("Type 'voice' to enter voice input mode.")
+        console.print("Type 'test voice' to run a voice input test.")
+        console.print("Type 'automode [number]' to enter Autonomous mode with a specific number of iterations.")
+        console.print("Type 'reset' to clear the conversation history.")
+        console.print("Type 'save chat' to save the conversation to a Markdown file.")
+        console.print("Type '11labs on' to enable text-to-speech.")
+        console.print("Type '11labs off' to disable text-to-speech.")
+        console.print("While in automode, press Ctrl+C at any time to exit the automode to return to regular chat.")
+
+        voice_mode = False
+
+        while True:
+            if voice_mode:
+                user_input = await voice_input()
+                if user_input is None:
+                    voice_mode = False
+                    cleanup_speech_recognition()
+                    console.print(Panel("Exited voice input mode due to error. Returning to text input.", style="bold yellow"))
+                    continue
+                
+                stay_in_voice_mode, command_result = process_voice_command(user_input)
+                if not stay_in_voice_mode:
+                    voice_mode = False
+                    cleanup_speech_recognition()
+                    console.print(Panel("Exited voice input mode. Returning to text input.", style="bold green"))
+                    if command_result:
+                        console.print(Panel(command_result, style="cyan"))
+                    continue
+                elif command_result:
+                    console.print(Panel(command_result, style="cyan"))
+                    continue
+            else:
                 user_input = await get_user_input()
 
-                iteration_count = 0
-                error_count = 0
-                max_errors = 3  # Maximum number of consecutive errors before exiting automode
+            if user_input.lower() == 'exit':
+                console.print(Panel("Thank you for chatting. Goodbye!", title_align="left", title="Goodbye", style="bold green"))
+                break
+
+            if user_input.lower() == 'test voice':
+                await test_voice_mode()
+                continue
+
+            if user_input.lower() == '11labs on':
+                use_tts = True
+                tts_enabled = True
+                console.print(Panel("Text-to-speech enabled.", style="bold green"))
+                continue
+
+            if user_input.lower() == '11labs off':
+                use_tts = False
+                tts_enabled = False
+                console.print(Panel("Text-to-speech disabled.", style="bold yellow"))
+                continue
+
+
+
+            if user_input.lower() == 'reset':
+                reset_conversation()
+                continue
+
+            if user_input.lower() == 'save chat':
+                filename = save_chat()
+                console.print(Panel(f"Chat saved to {filename}", title="Chat Saved", style="bold green"))
+                continue
+
+            if user_input.lower() == 'voice':
+                voice_mode = True
+                initialize_speech_recognition()
+                console.print(Panel("Entering voice input mode. Say 'exit voice mode' to return to text input.", style="bold green"))
+                continue
+
+            if user_input.lower() == 'image':
+                image_path = (await get_user_input("Drag and drop your image here, then press enter: ")).strip().replace("'", "")
+
+                if os.path.isfile(image_path):
+                    user_input = await get_user_input("You (prompt for image): ")
+                    response, _ = await chat_with_claude(user_input, image_path)
+                else:
+                    console.print(Panel("Invalid image path. Please try again.", title="Error", style="bold red"))
+                    continue
+            elif user_input.lower().startswith('automode'):
                 try:
-                    while automode and iteration_count < max_iterations:
-                        try:
-                            response, exit_continuation = await chat_with_claude(user_input, current_iteration=iteration_count+1, max_iterations=max_iterations)
-                            error_count = 0  # Reset error count on successful iteration
-                        except Exception as e:
-                            console.print(Panel(f"Error in automode iteration: {str(e)}", style="bold red"))
-                            error_count += 1
-                            if error_count >= max_errors:
-                                console.print(Panel(f"Exiting automode due to {max_errors} consecutive errors.", style="bold red"))
+                    parts = user_input.split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        max_iterations = int(parts[1])
+                    else:
+                        max_iterations = MAX_CONTINUATION_ITERATIONS
+
+                    automode = True
+                    console.print(Panel(f"Entering automode with {max_iterations} iterations. Please provide the goal of the automode.", title_align="left", title="Automode", style="bold yellow"))
+                    console.print(Panel("Press Ctrl+C at any time to exit the automode loop.", style="bold yellow"))
+                    user_input = await get_user_input()
+
+                    iteration_count = 0
+                    error_count = 0
+                    max_errors = 3  # Maximum number of consecutive errors before exiting automode
+                    try:
+                        while automode and iteration_count < max_iterations:
+                            try:
+                                response, exit_continuation = await chat_with_claude(user_input, current_iteration=iteration_count+1, max_iterations=max_iterations)
+                                error_count = 0  # Reset error count on successful iteration
+                            except Exception as e:
+                                console.print(Panel(f"Error in automode iteration: {str(e)}", style="bold red"))
+                                error_count += 1
+                                if error_count >= max_errors:
+                                    console.print(Panel(f"Exiting automode due to {max_errors} consecutive errors.", style="bold red"))
+                                    automode = False
+                                    break
+                                continue
+
+                            if exit_continuation or CONTINUATION_EXIT_PHRASE in response:
+                                console.print(Panel("Automode completed.", title_align="left", title="Automode", style="green"))
                                 automode = False
-                                break
-                            continue
+                            else:
+                                console.print(Panel(f"Continuation iteration {iteration_count + 1} completed. Press Ctrl+C to exit automode. ", title_align="left", title="Automode", style="yellow"))
+                                user_input = "Continue with the next step. Or STOP by saying 'AUTOMODE_COMPLETE' if you think you've achieved the results established in the original request."
+                            iteration_count += 1
 
-                        if exit_continuation or CONTINUATION_EXIT_PHRASE in response:
-                            console.print(Panel("Automode completed.", title_align="left", title="Automode", style="green"))
-                            automode = False
-                        else:
-                            console.print(Panel(f"Continuation iteration {iteration_count + 1} completed. Press Ctrl+C to exit automode. ", title_align="left", title="Automode", style="yellow"))
-                            user_input = "Continue with the next step. Or STOP by saying 'AUTOMODE_COMPLETE' if you think you've achieved the results established in the original request."
-                        iteration_count += 1
-
-                        if iteration_count >= max_iterations:
-                            console.print(Panel("Max iterations reached. Exiting automode.", title_align="left", title="Automode", style="bold red"))
-                            automode = False
+                            if iteration_count >= max_iterations:
+                                console.print(Panel("Max iterations reached. Exiting automode.", title_align="left", title="Automode", style="bold red"))
+                                automode = False
+                    except KeyboardInterrupt:
+                        console.print(Panel("\nAutomode interrupted by user. Exiting automode.", title_align="left", title="Automode", style="bold red"))
+                        automode = False
+                        if conversation_history and conversation_history[-1]["role"] == "user":
+                            conversation_history.append({"role": "assistant", "content": "Automode interrupted. How can I assist you further?"})
                 except KeyboardInterrupt:
                     console.print(Panel("\nAutomode interrupted by user. Exiting automode.", title_align="left", title="Automode", style="bold red"))
                     automode = False
                     if conversation_history and conversation_history[-1]["role"] == "user":
                         conversation_history.append({"role": "assistant", "content": "Automode interrupted. How can I assist you further?"})
-            except KeyboardInterrupt:
-                console.print(Panel("\nAutomode interrupted by user. Exiting automode.", title_align="left", title="Automode", style="bold red"))
-                automode = False
-                if conversation_history and conversation_history[-1]["role"] == "user":
-                    conversation_history.append({"role": "assistant", "content": "Automode interrupted. How can I assist you further?"})
 
-            console.print(Panel("Exited automode. Returning to regular chat.", style="green"))
-        else:
-            response, _ = await chat_with_claude(user_input)
+                console.print(Panel("Exited automode. Returning to regular chat.", style="green"))
+            else:
+                response, _ = await chat_with_claude(user_input)
 
 
 
     # Add more tests for other functions as needed
 
 if __name__ == "__main__":
-
-
-    # Run the main program
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -2233,3 +2294,4 @@ if __name__ == "__main__":
         logging.error(f"Unexpected error: {str(e)}", exc_info=True)
     finally:
         console.print("Program finished. Goodbye!", style="bold green")
+
