@@ -2285,6 +2285,8 @@ async def main():
     # Add more tests for other functions as needed
 
 if __name__ == "__main__":
+
+    # Run the main program
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
